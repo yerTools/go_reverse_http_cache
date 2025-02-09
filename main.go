@@ -94,8 +94,8 @@ func main() {
 			WriteTimeout:                  30 * time.Second,
 			MaxIdleConnDuration:           60 * time.Second,
 			NoDefaultUserAgentHeader:      true,
-			DisableHeaderNamesNormalizing: true,
-			DisablePathNormalizing:        true,
+			DisableHeaderNamesNormalizing: false,
+			DisablePathNormalizing:        false,
 			Dial: (&fasthttp.TCPDialer{
 				Concurrency:      availableForwarderSize * 2,
 				DNSCacheDuration: time.Hour,
@@ -165,7 +165,6 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 
 			cached.Value.Resp.CopyTo(&ctx.Response)
 
-			ctx.Response.Header.Set("X-Cache-Status", "hit")
 			ctx.Response.Header.Set("X-Cache-Allocation", strconv.FormatInt(c.cacheCost(), 10))
 
 			return
@@ -204,7 +203,7 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 	}
 
 	//log.Println("Setting cache")
-	cached := c.cache.Set(key, cacheValue{Resp: resp}, cost, 95*time.Second)
+	cached := c.cache.Set(key, cacheValue{Resp: resp}, cost, 5*time.Second)
 	if cached == nil {
 		//log.Println("Could not set cache")
 		resp.CopyTo(&ctx.Response)
@@ -212,11 +211,22 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 	}
 
 	resp.Header.Set("X-Cache-Cacheable", "true")
+	resp.Header.Set("X-Cache-Status", "hit")
 	resp.Header.Set("X-Cache-Key", fmt.Sprintf("%d:%d", key.Key, key.Conflict))
 	resp.Header.Set("X-Cache-Cost", strconv.FormatInt(cost, 10))
 	resp.Header.Set("X-Cache-Expiration", cached.Expiration.Format(time.RFC3339Nano))
+	if len(resp.Header.Peek("Cache-Control")) == 0 {
+		resp.Header.Set("Cache-Control", "public, immutable")
+	}
+	if len(resp.Header.Peek("Expires")) == 0 {
+		resp.Header.Set("Expires", cached.Expiration.Format(http.TimeFormat))
+	}
+	if len(resp.Header.Peek("Connection")) == 0 {
+		resp.Header.Set("Connection", "keep-alive")
+	}
 
 	resp.CopyTo(&ctx.Response)
+
 	ctx.Response.Header.Set("X-Cache-Status", "miss")
 }
 
@@ -237,7 +247,6 @@ func (c *httpCache) requestHandler(ctx *fasthttp.RequestCtx) {
 
 		cached.Value.Resp.CopyTo(&ctx.Response)
 
-		ctx.Response.Header.Set("X-Cache-Status", "hit")
 		ctx.Response.Header.Set("X-Cache-Allocation", strconv.FormatInt(c.cacheCost(), 10))
 
 		return
@@ -259,6 +268,30 @@ func calculateKey(r *fasthttp.Request) (cache.StoreKey, bool) {
 	hasher.Write(method)
 
 	hasher.Write([]byte{161, 2, 6, 9})
+	contentRange := r.Header.Peek(fasthttp.HeaderContentRange)
+	if contentRange != nil {
+		hasher.Write(contentRange)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	rangeHeader := r.Header.Peek(fasthttp.HeaderRange)
+	if rangeHeader != nil {
+		hasher.Write(rangeHeader)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	authorization := r.Header.Peek(fasthttp.HeaderAuthorization)
+	if authorization != nil {
+		hasher.Write(authorization)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	proxyAuthorization := r.Header.Peek(fasthttp.HeaderProxyAuthorization)
+	if proxyAuthorization != nil {
+		hasher.Write(proxyAuthorization)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
 	hasher.Write(r.Header.Host())
 
 	hasher.Write([]byte{161, 2, 6, 9})
@@ -270,9 +303,46 @@ func calculateKey(r *fasthttp.Request) (cache.StoreKey, bool) {
 	pathHash := hasher.Sum64()
 
 	hasher.Reset()
+
+	accept := r.Header.Peek(fasthttp.HeaderAccept)
+	if accept != nil {
+		hasher.Write(accept)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
 	acceptEncoding := r.Header.Peek(fasthttp.HeaderAcceptEncoding)
 	if acceptEncoding != nil {
 		hasher.Write(acceptEncoding)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	ifMatch := r.Header.Peek(fasthttp.HeaderIfMatch)
+	if ifMatch != nil {
+		hasher.Write(ifMatch)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	ifModifiedSince := r.Header.Peek(fasthttp.HeaderIfModifiedSince)
+	if ifModifiedSince != nil {
+		hasher.Write(ifModifiedSince)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	ifNoneMatch := r.Header.Peek(fasthttp.HeaderIfNoneMatch)
+	if ifNoneMatch != nil {
+		hasher.Write(ifNoneMatch)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	ifRange := r.Header.Peek(fasthttp.HeaderIfRange)
+	if ifRange != nil {
+		hasher.Write(ifRange)
+	}
+
+	hasher.Write([]byte{161, 2, 6, 9})
+	ifUnmodifiedSince := r.Header.Peek(fasthttp.HeaderIfUnmodifiedSince)
+	if ifUnmodifiedSince != nil {
+		hasher.Write(ifUnmodifiedSince)
 	}
 
 	return cache.StoreKey{
