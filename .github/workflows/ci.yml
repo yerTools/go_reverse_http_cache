@@ -37,8 +37,13 @@ jobs:
     needs: test
     strategy:
       matrix:
-        os: [linux, windows, macos]
+        os: [linux, windows, darwin]
         arch: [amd64, arm64, riscv64]
+        exclude:
+            - os: windows
+              arch: riscv64
+            - os: darwin
+              arch: riscv64
     env:
       GO111MODULE: "on"
     steps:
