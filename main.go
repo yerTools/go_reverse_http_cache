@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	_ "net/http/pprof"
 	"strconv"
 	"sync"
 	"time"
@@ -41,10 +40,6 @@ func nextReleaseResponseLevel(level releaseResponseLevel) (releaseResponseLevel,
 }
 
 func main() {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-
 	releaseResponseMap := make(map[releaseResponseLevel][]*fasthttp.Response)
 	nextReleaseResponseMap := make(map[releaseResponseLevel][]*fasthttp.Response)
 	releaseResponseMapLock := sync.Mutex{}
