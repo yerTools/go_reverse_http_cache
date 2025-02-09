@@ -25,6 +25,22 @@ func (c *Cache[V]) Cost() int64 {
 	return c.store.Cost()
 }
 
+func (c *Cache[V]) Len() int {
+	return c.store.Len()
+}
+
+func (c *Cache[V]) Clear() {
+	c.store.Clear()
+}
+
+func (c *Cache[V]) Keys(buffer []StoreKey) []StoreKey {
+	return c.store.Keys(buffer)
+}
+
+func (c *Cache[V]) Values(buffer []*StoreItem[V]) []*StoreItem[V] {
+	return c.store.Values(buffer)
+}
+
 func (c *Cache[V]) Set(key StoreKey, value V, cost int64, ttl time.Duration) *StoreItem[V] {
 	if c == nil {
 		return nil

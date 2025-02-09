@@ -48,6 +48,34 @@ func (s *store[V]) Cost() int64 {
 	return cost
 }
 
+func (s *store[V]) Len() int {
+	l := 0
+	for _, shard := range s.shards {
+		l += shard.Len()
+	}
+	return l
+}
+
+func (s *store[V]) Clear() {
+	for _, shard := range s.shards {
+		shard.Clear()
+	}
+}
+
+func (s *store[V]) Keys(buffer []StoreKey) []StoreKey {
+	for _, shard := range s.shards {
+		buffer = shard.Keys(buffer)
+	}
+	return buffer
+}
+
+func (s *store[V]) Values(buffer []*StoreItem[V]) []*StoreItem[V] {
+	for _, shard := range s.shards {
+		buffer = shard.Values(buffer)
+	}
+	return buffer
+}
+
 func (s *store[V]) Set(now time.Time, item *StoreItem[V]) *StoreItem[V] {
 	return s.shards[item.Key.Key%ShardCount].Set(now, item)
 }
@@ -148,7 +176,7 @@ func (m *storeItemMap[V]) IsEmpty() bool {
 	return len(m.data) == 0
 }
 
-func (m *storeItemMap[V]) Length() int {
+func (m *storeItemMap[V]) Len() int {
 	i := 0
 	for _, v := range m.data {
 		i += len(v)
@@ -163,14 +191,30 @@ func (m *storeItemMap[V]) Clear() {
 	}
 }
 
-func (m *storeItemMap[V]) Items() []*StoreItem[V] {
-	result := make([]*StoreItem[V], 0, m.Length())
-
-	for _, v := range m.data {
-		result = append(result, v...)
+func (m *storeItemMap[V]) Keys(buffer []StoreKey) []StoreKey {
+	if buffer == nil {
+		buffer = make([]StoreKey, 0, m.Len())
 	}
 
-	return result
+	for _, v := range m.data {
+		for _, e := range v {
+			buffer = append(buffer, e.Key)
+		}
+	}
+
+	return buffer
+}
+
+func (m *storeItemMap[V]) Values(buffer []*StoreItem[V]) []*StoreItem[V] {
+	if buffer == nil {
+		buffer = make([]*StoreItem[V], 0, m.Len())
+	}
+
+	for _, v := range m.data {
+		buffer = append(buffer, v...)
+	}
+
+	return buffer
 }
 
 func currentBucket(t time.Time, size time.Duration) int64 {
@@ -206,6 +250,50 @@ func (m *concurrentMap[V]) Cost() int64 {
 	defer m.mutex.RUnlock()
 
 	return m.cost
+}
+
+func (m *concurrentMap[V]) Clear() {
+	var removed []*StoreItem[V]
+	defer func() {
+		if removed != nil && m.onRemoved != nil {
+			for _, item := range removed {
+				m.onRemoved(item)
+			}
+		}
+	}()
+
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.onRemoved != nil {
+		removed = m.data.Values(nil)
+	}
+	m.data.Clear()
+	for k := range m.expirationBuckets {
+		delete(m.expirationBuckets, k)
+	}
+	m.cost = 0
+}
+
+func (m *concurrentMap[V]) Len() int {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	return m.data.Len()
+}
+
+func (m *concurrentMap[V]) Keys(buffer []StoreKey) []StoreKey {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	return m.data.Keys(buffer)
+}
+
+func (m *concurrentMap[V]) Values(buffer []*StoreItem[V]) []*StoreItem[V] {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	return m.data.Values(buffer)
 }
 
 func (m *concurrentMap[V]) Set(now time.Time, item *StoreItem[V]) *StoreItem[V] {
@@ -329,13 +417,15 @@ func (m *concurrentMap[V]) PurgeExpired(now time.Time) {
 }
 
 func (m *concurrentMap[V]) purgeRemoveItemsLocked(bucket storeItemMap[V], number int64, removed *[]*StoreItem[V]) {
-	for _, item := range bucket.Items() {
+	values := bucket.Values(nil)
+
+	for _, item := range values {
 		m.cost -= item.Cost
 		m.data.Remove(item.Key)
 	}
 
 	if m.onRemoved != nil {
-		*removed = append(*removed, bucket.Items()...)
+		*removed = append(*removed, values...)
 	}
 
 	delete(m.expirationBuckets, number)
