@@ -13,6 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o go_reverse_http_cache 
 
 FROM scratch
 
+COPY --from=alpine:latest /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /app/go_reverse_http_cache /go_reverse_http_cache
 
 EXPOSE 8161
