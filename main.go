@@ -214,14 +214,19 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 	resp.Header.Set("X-Cache-Key", fmt.Sprintf("%d:%d", key.Key, key.Conflict))
 	resp.Header.Set("X-Cache-Cost", strconv.FormatInt(cost, 10))
 	resp.Header.Set("X-Cache-Expiration", cached.Expiration.Format(time.RFC3339Nano))
-	if len(resp.Header.Peek("Cache-Control")) == 0 {
-		resp.Header.Set("Cache-Control", "public, immutable")
+
+	if len(resp.Header.Peek(fasthttp.HeaderCacheControl)) == 0 {
+		resp.Header.Set(fasthttp.HeaderCacheControl, "public")
 	}
-	if len(resp.Header.Peek("Expires")) == 0 {
-		resp.Header.Set("Expires", cached.Expiration.Format(http.TimeFormat))
+	if len(resp.Header.Peek(fasthttp.HeaderExpires)) == 0 {
+		resp.Header.Set(fasthttp.HeaderExpires, cached.Expiration.Format(http.TimeFormat))
 	}
-	if len(resp.Header.Peek("Connection")) == 0 {
-		resp.Header.Set("Connection", "keep-alive")
+	if len(resp.Header.Peek("CDN-Cache-Control")) == 0 {
+		resp.Header.Set("CDN-Cache-Control", "max-age=60")
+	}
+
+	if len(resp.Header.Peek(fasthttp.HeaderConnection)) == 0 {
+		resp.Header.Set(fasthttp.HeaderConnection, "keep-alive")
 	}
 
 	resp.CopyTo(&ctx.Response)
