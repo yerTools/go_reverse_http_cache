@@ -14,7 +14,7 @@ import (
 	"github.com/yerTools/go_reverse_http_cache/src/go/cache"
 )
 
-const availableForwarderSize = 128
+const availableForwarderSize = 16
 
 type releaseResponseLevel int
 
@@ -173,7 +173,7 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	ctx.Request.CopyTo(req)
-	req.SetHost("example.org")
+	req.SetHost("ltl.re")
 	req.URI().SetScheme("https")
 	log.Printf("Forwarding to %v\n", req.URI())
 
@@ -202,7 +202,7 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 	}
 
 	//log.Println("Setting cache")
-	cached := c.cache.Set(key, cacheValue{Resp: resp}, cost, 5*time.Second)
+	cached := c.cache.Set(key, cacheValue{Resp: resp}, cost, 60*time.Second)
 	if cached == nil {
 		//log.Println("Could not set cache")
 		resp.CopyTo(&ctx.Response)
