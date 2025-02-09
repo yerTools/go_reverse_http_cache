@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pierrec/xxHash/xxHash64"
 	"github.com/valyala/fasthttp"
 
 	"github.com/yerTools/go_reverse_http_cache/src/go/cache"
@@ -256,7 +255,17 @@ func (c *httpCache) requestHandler(ctx *fasthttp.RequestCtx) {
 	c.forwardHandler(ctx, key, true)
 }
 
+func writeSection(h *cache.StoreKeyHash, section []byte, delimiter []byte) {
+	h.Write(delimiter)
+	if section == nil {
+		return
+	}
+
+	h.Write(section)
+}
+
 func calculateKey(r *fasthttp.Request) (cache.StoreKey, bool) {
+
 	method := r.Header.Method()
 	methodStr := string(method)
 
@@ -264,89 +273,29 @@ func calculateKey(r *fasthttp.Request) (cache.StoreKey, bool) {
 		return cache.StoreKey{}, false
 	}
 
-	hasher := xxHash64.New(161_269)
-	hasher.Write(method)
+	hasher := cache.NewStoreKeyHash(161_269_1337, 1337_269_161)
+	delimiter := []byte{161, 2, 6, 9, 0, 13, 10, 13, 10, 0}
 
-	hasher.Write([]byte{161, 2, 6, 9})
-	contentRange := r.Header.Peek(fasthttp.HeaderContentRange)
-	if contentRange != nil {
-		hasher.Write(contentRange)
-	}
+	writeSection(hasher, method, delimiter)
 
-	hasher.Write([]byte{161, 2, 6, 9})
-	rangeHeader := r.Header.Peek(fasthttp.HeaderRange)
-	if rangeHeader != nil {
-		hasher.Write(rangeHeader)
-	}
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderContentRange), delimiter)
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderRange), delimiter)
 
-	hasher.Write([]byte{161, 2, 6, 9})
-	authorization := r.Header.Peek(fasthttp.HeaderAuthorization)
-	if authorization != nil {
-		hasher.Write(authorization)
-	}
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderAuthorization), delimiter)
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderProxyAuthorization), delimiter)
 
-	hasher.Write([]byte{161, 2, 6, 9})
-	proxyAuthorization := r.Header.Peek(fasthttp.HeaderProxyAuthorization)
-	if proxyAuthorization != nil {
-		hasher.Write(proxyAuthorization)
-	}
+	writeSection(hasher, r.Header.Host(), delimiter)
+	writeSection(hasher, r.URI().Path(), delimiter)
+	writeSection(hasher, r.URI().QueryString(), delimiter)
 
-	hasher.Write([]byte{161, 2, 6, 9})
-	hasher.Write(r.Header.Host())
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderAccept), delimiter)
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderAcceptEncoding), delimiter)
 
-	hasher.Write([]byte{161, 2, 6, 9})
-	hasher.Write(r.URI().Path())
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderIfMatch), delimiter)
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderIfModifiedSince), delimiter)
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderIfNoneMatch), delimiter)
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderIfRange), delimiter)
+	writeSection(hasher, r.Header.Peek(fasthttp.HeaderIfUnmodifiedSince), delimiter)
 
-	hasher.Write([]byte{161, 2, 6, 9})
-	hasher.Write(r.URI().QueryString())
-
-	pathHash := hasher.Sum64()
-
-	hasher.Reset()
-
-	accept := r.Header.Peek(fasthttp.HeaderAccept)
-	if accept != nil {
-		hasher.Write(accept)
-	}
-
-	hasher.Write([]byte{161, 2, 6, 9})
-	acceptEncoding := r.Header.Peek(fasthttp.HeaderAcceptEncoding)
-	if acceptEncoding != nil {
-		hasher.Write(acceptEncoding)
-	}
-
-	hasher.Write([]byte{161, 2, 6, 9})
-	ifMatch := r.Header.Peek(fasthttp.HeaderIfMatch)
-	if ifMatch != nil {
-		hasher.Write(ifMatch)
-	}
-
-	hasher.Write([]byte{161, 2, 6, 9})
-	ifModifiedSince := r.Header.Peek(fasthttp.HeaderIfModifiedSince)
-	if ifModifiedSince != nil {
-		hasher.Write(ifModifiedSince)
-	}
-
-	hasher.Write([]byte{161, 2, 6, 9})
-	ifNoneMatch := r.Header.Peek(fasthttp.HeaderIfNoneMatch)
-	if ifNoneMatch != nil {
-		hasher.Write(ifNoneMatch)
-	}
-
-	hasher.Write([]byte{161, 2, 6, 9})
-	ifRange := r.Header.Peek(fasthttp.HeaderIfRange)
-	if ifRange != nil {
-		hasher.Write(ifRange)
-	}
-
-	hasher.Write([]byte{161, 2, 6, 9})
-	ifUnmodifiedSince := r.Header.Peek(fasthttp.HeaderIfUnmodifiedSince)
-	if ifUnmodifiedSince != nil {
-		hasher.Write(ifUnmodifiedSince)
-	}
-
-	return cache.StoreKey{
-		Key:      pathHash,
-		Conflict: hasher.Sum64(),
-	}, true
+	return hasher.StoreKey(), true
 }

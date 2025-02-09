@@ -11,11 +11,6 @@ const (
 	StoreItemExpirationOverhead        = 8
 )
 
-type StoreKey struct {
-	Key      uint64
-	Conflict uint64
-}
-
 type StoreItem[V any] struct {
 	Key        StoreKey
 	Value      V
