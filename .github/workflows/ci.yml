@@ -1,0 +1,90 @@
+name: CI & Release
+
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+
+jobs:
+  test:
+    name: Test & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.4"
+
+      - name: Check Code Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The folling files are not formatted properly:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run Tests
+        run: go test -v ./...
+
+  build:
+    name: Build Binaries (Matrix)
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        os: [linux, windows, macos]
+        arch: [amd64, arm64, riscv64]
+    env:
+      GO111MODULE: "on"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.4"
+
+      - name: Build for ${{ matrix.os }} ${{ matrix.arch }}
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p build
+          BIN_NAME=go_reverse_http_cache_${{ matrix.os }}_${{ matrix.arch }}
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            BIN_NAME="${BIN_NAME}.exe"
+          fi
+          echo "Building for OS: $GOOS, Arch: $GOARCH -> $BIN_NAME"
+          go build -o build/${BIN_NAME} ./main.go
+          ls -lah build/
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.os }}-${{ matrix.arch }}
+          path: build/go_reverse_http_cache_${{ matrix.os }}_${{ matrix.arch }}*
+  
+  release:
+    name: Attach Artifacts to Release
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: build
+
+      - name: Create and Upload Release Assets
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: build/*
