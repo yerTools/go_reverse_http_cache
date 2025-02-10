@@ -24,6 +24,14 @@ const (
 	releaseResponseLevel3
 )
 
+type addToCacheLevel int
+
+const (
+	dontAddToCache addToCacheLevel = iota
+	addToCacheIfNotCached
+	forceAddToCache
+)
+
 func nextReleaseResponseLevel(level releaseResponseLevel) (releaseResponseLevel, bool) {
 	switch level {
 	case releaseResponseLevel0:
@@ -40,8 +48,8 @@ func nextReleaseResponseLevel(level releaseResponseLevel) (releaseResponseLevel,
 }
 
 func main() {
-	releaseResponseMap := make(map[releaseResponseLevel][]*fasthttp.Response)
-	nextReleaseResponseMap := make(map[releaseResponseLevel][]*fasthttp.Response)
+	releaseResponseMap := make(map[releaseResponseLevel][]cacheValue)
+	nextReleaseResponseMap := make(map[releaseResponseLevel][]cacheValue)
 	releaseResponseMapLock := sync.Mutex{}
 
 	releaseResponseTicker := time.NewTicker(time.Second)
@@ -59,7 +67,12 @@ func main() {
 					nextLevel, release := nextReleaseResponseLevel(level)
 					if release {
 						for _, response := range responses {
-							fasthttp.ReleaseResponse(response)
+							if response.Response != nil {
+								fasthttp.ReleaseResponse(response.Response)
+							}
+							if response.Request != nil {
+								fasthttp.ReleaseRequest(response.Request)
+							}
 						}
 						nextReleaseResponseMap[releaseResponseLevel0] = responses[:0]
 					} else {
@@ -78,7 +91,7 @@ func main() {
 		releaseResponseMapLock.Lock()
 		defer releaseResponseMapLock.Unlock()
 
-		releaseResponseMap[releaseResponseLevel0] = append(releaseResponseMap[releaseResponseLevel0], value.Value.Resp)
+		releaseResponseMap[releaseResponseLevel0] = append(releaseResponseMap[releaseResponseLevel0], value.Value)
 	})
 
 	c := &httpCache{
@@ -104,6 +117,29 @@ func main() {
 		c.availableForwarder <- struct{}{}
 	}
 
+	go func() {
+		refreshTicker := time.NewTicker(time.Second * 5)
+
+		for now := range refreshTicker.C {
+			wg := sync.WaitGroup{}
+
+			for _, value := range c.cache.ValuesInExpirationBuckets(nil, time.Time{}, now.Add(time.Second*15)) {
+				if value.Value.Request == nil {
+					continue
+				}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					resp := fasthttp.AcquireResponse()
+					defer fasthttp.ReleaseResponse(resp)
+					c.forwardHandler(value.Value.Request, resp, value.Key, forceAddToCache)
+				}()
+			}
+
+			wg.Wait()
+		}
+	}()
+
 	log.Println("fasthttp server is running on :8161")
 	if err := fasthttp.ListenAndServe(":8161", c.requestHandler); err != nil {
 		log.Fatalf("Could not start fasthttp server: %v", err)
@@ -111,7 +147,8 @@ func main() {
 }
 
 type cacheValue struct {
-	Resp *fasthttp.Response
+	Request  *fasthttp.Request
+	Response *fasthttp.Response
 }
 
 type httpCache struct {
@@ -146,39 +183,39 @@ func (c *httpCache) cacheCost() int64 {
 	return c.lastCost
 }
 
-func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey, addToCache bool) {
-	if !addToCache {
+func (c *httpCache) forwardHandler(targetReq *fasthttp.Request, targetResp *fasthttp.Response, key cache.StoreKey, addToCache addToCacheLevel) error {
+	if addToCache == dontAddToCache {
 		<-c.availableForwarder
 		defer func() { c.availableForwarder <- struct{}{} }()
 
 		req := fasthttp.AcquireRequest()
 		defer fasthttp.ReleaseRequest(req)
-		ctx.Request.CopyTo(req)
+		targetReq.CopyTo(req)
 		req.SetHost("ltl.re")
 		req.URI().SetScheme("https")
 		log.Printf("Forwarding to %v\n", req.URI())
 
-		err := c.client.Do(req, &ctx.Response)
+		err := c.client.Do(req, targetResp)
 		if err != nil {
 			log.Printf("Error forwarding request: %v\n", err)
-			ctx.Error("Internal Cache Server Error", fasthttp.StatusInternalServerError)
-			return
+			c.writeError(targetResp, "Internal Cache Server Error", fasthttp.StatusInternalServerError)
+			return err
 		}
-		ctx.Response.Header.Set("X-Cache-Status", "miss")
-		ctx.Response.Header.Set("X-Cache-Cacheable", "false")
-		return
+		targetResp.Header.Set("X-Cache-Status", "miss")
+		targetResp.Header.Set("X-Cache-Cacheable", "false")
+		return nil
 	}
 
 	res, err, shared := c.sfGroup.Do(key.String(), func() (interface{}, error) {
 		<-c.availableForwarder
 		defer func() { c.availableForwarder <- struct{}{} }()
 
-		if addToCache {
+		if addToCache == addToCacheIfNotCached {
 			cached, ok := c.cache.Get(key)
 			if ok {
-				cached.Value.Resp.CopyTo(&ctx.Response)
+				cached.Value.Response.CopyTo(targetResp)
 
-				ctx.Response.Header.Set("X-Cache-Allocation", strconv.FormatInt(c.cacheCost(), 10))
+				targetResp.Header.Set("X-Cache-Allocation", strconv.FormatInt(c.cacheCost(), 10))
 
 				return cached.Value, nil
 			}
@@ -186,7 +223,7 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 
 		req := fasthttp.AcquireRequest()
 		defer fasthttp.ReleaseRequest(req)
-		ctx.Request.CopyTo(req)
+		targetReq.CopyTo(req)
 		req.SetHost("ltl.re")
 		req.URI().SetScheme("https")
 		log.Printf("Forwarding to %v (singleflight)\n", req.URI())
@@ -198,15 +235,24 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 			return nil, err
 		}
 
-		cost := int64(8) + int64(len(resp.Body()))
+		reqCopy := fasthttp.AcquireRequest()
+		req.CopyTo(reqCopy)
+
+		cost := int64(8+8) + int64(len(resp.Body())+len(reqCopy.Body()))
 		for _, hKey := range resp.Header.PeekKeys() {
 			cost += int64(len(hKey))
 			for _, vv := range resp.Header.PeekAll(string(hKey)) {
 				cost += int64(len(vv))
 			}
 		}
+		for _, hKey := range reqCopy.Header.PeekKeys() {
+			cost += int64(len(hKey))
+			for _, vv := range reqCopy.Header.PeekAll(string(hKey)) {
+				cost += int64(len(vv))
+			}
+		}
 
-		cached := c.cache.Set(key, cacheValue{Resp: resp}, cost, 60*time.Second)
+		cached := c.cache.Set(key, cacheValue{Response: resp, Request: reqCopy}, cost, 60*time.Second)
 		if cached == nil {
 			return resp, nil
 		}
@@ -235,18 +281,27 @@ func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey,
 
 	if err != nil {
 		log.Printf("Error forwarding request (singleflight): %v\n", err)
-		ctx.Error("Internal Cache Server Error", fasthttp.StatusInternalServerError)
-		return
+		c.writeError(targetResp, "Internal Cache Server Error", fasthttp.StatusInternalServerError)
+		return err
 	}
 
 	resp, ok := res.(*fasthttp.Response)
 	if !ok {
-		resp = res.(cacheValue).Resp
+		resp = res.(cacheValue).Response
 	}
-	resp.CopyTo(&ctx.Response)
+	resp.CopyTo(targetResp)
 	if !shared && ok {
-		ctx.Response.Header.Set("X-Cache-Status", "miss")
+		targetResp.Header.Set("X-Cache-Status", "miss")
 	}
+
+	return nil
+}
+
+func (*httpCache) writeError(resp *fasthttp.Response, msg string, statusCode int) {
+	resp.Reset()
+	resp.SetStatusCode(statusCode)
+	resp.Header.SetContentTypeBytes([]byte("text/plain; charset=utf-8"))
+	resp.SetBodyString(msg)
 }
 
 func (c *httpCache) requestHandler(ctx *fasthttp.RequestCtx) {
@@ -255,7 +310,7 @@ func (c *httpCache) requestHandler(ctx *fasthttp.RequestCtx) {
 	//log.Println("Calculating key")
 	key, ok := calculateKey(&ctx.Request)
 	if !ok {
-		c.forwardHandler(ctx, key, false)
+		c.forwardHandler(&ctx.Request, &ctx.Response, key, dontAddToCache)
 		return
 	}
 	//log.Printf("Key: %d\n", key)
@@ -264,7 +319,7 @@ func (c *httpCache) requestHandler(ctx *fasthttp.RequestCtx) {
 	if ok {
 		//log.Println("Cache hit")
 
-		cached.Value.Resp.CopyTo(&ctx.Response)
+		cached.Value.Response.CopyTo(&ctx.Response)
 
 		ctx.Response.Header.Set("X-Cache-Allocation", strconv.FormatInt(c.cacheCost(), 10))
 
@@ -272,7 +327,7 @@ func (c *httpCache) requestHandler(ctx *fasthttp.RequestCtx) {
 	}
 
 	//log.Println("Cache miss, calling forward handler")
-	c.forwardHandler(ctx, key, true)
+	c.forwardHandler(&ctx.Request, &ctx.Response, key, addToCacheIfNotCached)
 }
 
 func writeSection(h *cache.StoreKeyHash, section []byte, delimiter []byte) {
