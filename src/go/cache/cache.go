@@ -41,6 +41,10 @@ func (c *Cache[V]) Values(buffer []*StoreItem[V]) []*StoreItem[V] {
 	return c.store.Values(buffer)
 }
 
+func (c *Cache[V]) ValuesInExpirationBuckets(buffer []*StoreItem[V], from, until time.Time) []*StoreItem[V] {
+	return c.store.ValuesInExpirationBuckets(buffer, from, until)
+}
+
 func (c *Cache[V]) Set(key StoreKey, value V, cost int64, ttl time.Duration) *StoreItem[V] {
 	if c == nil {
 		return nil

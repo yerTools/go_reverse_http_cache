@@ -71,6 +71,13 @@ func (s *store[V]) Values(buffer []*StoreItem[V]) []*StoreItem[V] {
 	return buffer
 }
 
+func (s *store[V]) ValuesInExpirationBuckets(buffer []*StoreItem[V], from, until time.Time) []*StoreItem[V] {
+	for _, shard := range s.shards {
+		buffer = shard.ValuesInExpirationBuckets(buffer, from, until)
+	}
+	return buffer
+}
+
 func (s *store[V]) Set(now time.Time, item *StoreItem[V]) *StoreItem[V] {
 	return s.shards[item.Key.Key%ShardCount].Set(now, item)
 }
@@ -291,6 +298,60 @@ func (m *concurrentMap[V]) Values(buffer []*StoreItem[V]) []*StoreItem[V] {
 	return m.data.Values(buffer)
 }
 
+func (m *concurrentMap[V]) ValuesInExpirationBuckets(buffer []*StoreItem[V], from, until time.Time) []*StoreItem[V] {
+	var fromBucket int64
+	if !from.IsZero() {
+		fromBucket = currentBucket(from, m.bucketSize)
+	}
+	var untilBucket int64
+	if !until.IsZero() {
+		untilBucket = currentBucket(until, m.bucketSize)
+	}
+
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	if len(m.expirationBuckets) == 0 || untilBucket <= m.purgedBucket && untilBucket != 0 {
+		return buffer
+	}
+
+	if untilBucket == 0 {
+		for number, bucket := range m.expirationBuckets {
+			if number < fromBucket {
+				continue
+			}
+
+			buffer = bucket.Values(buffer)
+		}
+		return buffer
+	}
+
+	if fromBucket <= m.purgedBucket {
+		fromBucket = m.purgedBucket + 1
+	}
+
+	if len(m.expirationBuckets) <= int(untilBucket-fromBucket+1) {
+		for number, bucket := range m.expirationBuckets {
+			if number < fromBucket || number > untilBucket {
+				continue
+			}
+
+			buffer = bucket.Values(buffer)
+		}
+	} else {
+		for number := fromBucket; number <= untilBucket; number++ {
+			bucket, ok := m.expirationBuckets[number]
+			if !ok {
+				continue
+			}
+
+			buffer = bucket.Values(buffer)
+		}
+	}
+
+	return buffer
+}
+
 func (m *concurrentMap[V]) Set(now time.Time, item *StoreItem[V]) *StoreItem[V] {
 	item.Cost += StoreItemOverhead
 	if !item.Expiration.IsZero() {
@@ -366,9 +427,6 @@ func (m *concurrentMap[V]) removeItemFromTimeBucketLocked(item *StoreItem[V]) {
 
 func (m *concurrentMap[V]) PurgeExpired(now time.Time) {
 	currentBucket := currentBucket(now, m.bucketSize) - 1
-	if currentBucket <= m.purgedBucket {
-		return
-	}
 
 	var removed []*StoreItem[V]
 	defer func() {
@@ -383,6 +441,10 @@ func (m *concurrentMap[V]) PurgeExpired(now time.Time) {
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
+	if currentBucket <= m.purgedBucket {
+		return
+	}
 
 	if len(m.expirationBuckets) == 0 {
 		m.purgedBucket = currentBucket
