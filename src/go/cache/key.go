@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"encoding/hex"
 	"hash"
 	"math/bits"
 
@@ -24,6 +25,35 @@ func load64le(p []byte) uint64 {
 type StoreKey struct {
 	Key      uint64
 	Conflict uint64
+}
+
+func (k StoreKey) Bytes() []byte {
+	return []byte{
+		byte(k.Key >> 56),
+		byte(k.Key >> 48),
+		byte(k.Key >> 40),
+		byte(k.Key >> 32),
+		byte(k.Key >> 24),
+		byte(k.Key >> 16),
+		byte(k.Key >> 8),
+		byte(k.Key),
+		byte(k.Conflict >> 56),
+		byte(k.Conflict >> 48),
+		byte(k.Conflict >> 40),
+		byte(k.Conflict >> 32),
+		byte(k.Conflict >> 24),
+		byte(k.Conflict >> 16),
+		byte(k.Conflict >> 8),
+		byte(k.Conflict),
+	}
+}
+
+func (k StoreKey) String() string {
+	return string(k.Bytes())
+}
+
+func (k StoreKey) Hex() string {
+	return hex.EncodeToString(k.Bytes())
 }
 
 func StoreKeyFromUint64(key uint64) StoreKey {
