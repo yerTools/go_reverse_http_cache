@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -9,6 +8,7 @@ import (
 	"time"
 
 	"github.com/valyala/fasthttp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/yerTools/go_reverse_http_cache/src/go/cache"
 )
@@ -97,7 +97,7 @@ func main() {
 		},
 		availableForwarder: make(chan struct{}, availableForwarderSize),
 		lastCost:           0,
-		lastCostMutex:      &sync.RWMutex{},
+		lastCostMutex:      sync.RWMutex{},
 	}
 
 	for i := 0; i < availableForwarderSize; i++ {
@@ -115,12 +115,16 @@ type cacheValue struct {
 }
 
 type httpCache struct {
-	cache              *cache.Cache[cacheValue]
-	client             *fasthttp.Client
+	cache  *cache.Cache[cacheValue]
+	client *fasthttp.Client
+
 	availableForwarder chan struct{}
-	lastCost           int64
-	lastCostExpires    time.Time
-	lastCostMutex      *sync.RWMutex
+
+	sfGroup singleflight.Group
+
+	lastCost        int64
+	lastCostExpires time.Time
+	lastCostMutex   sync.RWMutex
 }
 
 func (c *httpCache) cacheCost() int64 {
@@ -143,90 +147,106 @@ func (c *httpCache) cacheCost() int64 {
 }
 
 func (c *httpCache) forwardHandler(ctx *fasthttp.RequestCtx, key cache.StoreKey, addToCache bool) {
-	//log.Printf("Requesting for %v\n", ctx.Request.URI())
+	if !addToCache {
+		<-c.availableForwarder
+		defer func() { c.availableForwarder <- struct{}{} }()
 
-	<-c.availableForwarder
-	defer func() {
-		c.availableForwarder <- struct{}{}
-	}()
+		req := fasthttp.AcquireRequest()
+		defer fasthttp.ReleaseRequest(req)
+		ctx.Request.CopyTo(req)
+		req.SetHost("ltl.re")
+		req.URI().SetScheme("https")
+		log.Printf("Forwarding to %v\n", req.URI())
 
-	//log.Println("Got forwarding slot")
-
-	if addToCache {
-		cached, ok := c.cache.Get(key)
-		if ok {
-			//log.Println("Don't need to forward: cache hit")
-
-			cached.Value.Resp.CopyTo(&ctx.Response)
-
-			ctx.Response.Header.Set("X-Cache-Allocation", strconv.FormatInt(c.cacheCost(), 10))
-
+		err := c.client.Do(req, &ctx.Response)
+		if err != nil {
+			log.Printf("Error forwarding request: %v\n", err)
+			ctx.Error("Internal Cache Server Error", fasthttp.StatusInternalServerError)
 			return
 		}
-	}
-
-	req := fasthttp.AcquireRequest()
-	defer fasthttp.ReleaseRequest(req)
-	ctx.Request.CopyTo(req)
-	req.SetHost("ltl.re")
-	req.URI().SetScheme("https")
-	log.Printf("Forwarding to %v\n", req.URI())
-
-	if !addToCache {
-		c.client.Do(req, &ctx.Response)
-
 		ctx.Response.Header.Set("X-Cache-Status", "miss")
 		ctx.Response.Header.Set("X-Cache-Cacheable", "false")
 		return
 	}
 
-	resp := fasthttp.AcquireResponse()
-	err := c.client.Do(req, resp)
+	res, err, shared := c.sfGroup.Do(key.String(), func() (interface{}, error) {
+		<-c.availableForwarder
+		defer func() { c.availableForwarder <- struct{}{} }()
+
+		if addToCache {
+			cached, ok := c.cache.Get(key)
+			if ok {
+				cached.Value.Resp.CopyTo(&ctx.Response)
+
+				ctx.Response.Header.Set("X-Cache-Allocation", strconv.FormatInt(c.cacheCost(), 10))
+
+				return cached.Value, nil
+			}
+		}
+
+		req := fasthttp.AcquireRequest()
+		defer fasthttp.ReleaseRequest(req)
+		ctx.Request.CopyTo(req)
+		req.SetHost("ltl.re")
+		req.URI().SetScheme("https")
+		log.Printf("Forwarding to %v (singleflight)\n", req.URI())
+
+		resp := fasthttp.AcquireResponse()
+		err := c.client.Do(req, resp)
+		if err != nil {
+			fasthttp.ReleaseResponse(resp)
+			return nil, err
+		}
+
+		cost := int64(8) + int64(len(resp.Body()))
+		for _, hKey := range resp.Header.PeekKeys() {
+			cost += int64(len(hKey))
+			for _, vv := range resp.Header.PeekAll(string(hKey)) {
+				cost += int64(len(vv))
+			}
+		}
+
+		cached := c.cache.Set(key, cacheValue{Resp: resp}, cost, 60*time.Second)
+		if cached == nil {
+			return resp, nil
+		}
+
+		resp.Header.Set("X-Cache-Cacheable", "true")
+		resp.Header.Set("X-Cache-Status", "hit")
+		resp.Header.Set("X-Cache-Key", key.Hex())
+		resp.Header.Set("X-Cache-Cost", strconv.FormatInt(cost, 10))
+		resp.Header.Set("X-Cache-Expiration", cached.Expiration.Format(time.RFC3339Nano))
+
+		if len(resp.Header.Peek(fasthttp.HeaderCacheControl)) == 0 {
+			resp.Header.Set(fasthttp.HeaderCacheControl, "public")
+		}
+		if len(resp.Header.Peek(fasthttp.HeaderExpires)) == 0 {
+			resp.Header.Set(fasthttp.HeaderExpires, cached.Expiration.Format(http.TimeFormat))
+		}
+		if len(resp.Header.Peek("CDN-Cache-Control")) == 0 {
+			resp.Header.Set("CDN-Cache-Control", "max-age=60")
+		}
+		if len(resp.Header.Peek(fasthttp.HeaderConnection)) == 0 {
+			resp.Header.Set(fasthttp.HeaderConnection, "keep-alive")
+		}
+
+		return resp, nil
+	})
+
 	if err != nil {
-		log.Printf("Error forwarding request: %v\n", err)
+		log.Printf("Error forwarding request (singleflight): %v\n", err)
 		ctx.Error("Internal Cache Server Error", fasthttp.StatusInternalServerError)
 		return
 	}
 
-	cost := int64(8) + int64(len(resp.Body()))
-	for _, key := range resp.Header.PeekKeys() {
-		cost += int64(len(key))
-		for _, vv := range resp.Header.PeekAll(string(key)) {
-			cost += int64(len(vv))
-		}
+	resp, ok := res.(*fasthttp.Response)
+	if !ok {
+		resp = res.(cacheValue).Resp
 	}
-
-	//log.Println("Setting cache")
-	cached := c.cache.Set(key, cacheValue{Resp: resp}, cost, 60*time.Second)
-	if cached == nil {
-		//log.Println("Could not set cache")
-		resp.CopyTo(&ctx.Response)
-		return
-	}
-
-	resp.Header.Set("X-Cache-Cacheable", "true")
-	resp.Header.Set("X-Cache-Status", "hit")
-	resp.Header.Set("X-Cache-Key", fmt.Sprintf("%d:%d", key.Key, key.Conflict))
-	resp.Header.Set("X-Cache-Cost", strconv.FormatInt(cost, 10))
-	resp.Header.Set("X-Cache-Expiration", cached.Expiration.Format(time.RFC3339Nano))
-
-	if len(resp.Header.Peek(fasthttp.HeaderCacheControl)) == 0 {
-		resp.Header.Set(fasthttp.HeaderCacheControl, "public")
-	}
-	if len(resp.Header.Peek(fasthttp.HeaderExpires)) == 0 {
-		resp.Header.Set(fasthttp.HeaderExpires, cached.Expiration.Format(http.TimeFormat))
-	}
-	if len(resp.Header.Peek("CDN-Cache-Control")) == 0 {
-		resp.Header.Set("CDN-Cache-Control", "max-age=60")
-	}
-
-	if len(resp.Header.Peek(fasthttp.HeaderConnection)) == 0 {
-		resp.Header.Set(fasthttp.HeaderConnection, "keep-alive")
-	}
-
 	resp.CopyTo(&ctx.Response)
-
-	ctx.Response.Header.Set("X-Cache-Status", "miss")
+	if !shared && ok {
+		ctx.Response.Header.Set("X-Cache-Status", "miss")
+	}
 }
 
 func (c *httpCache) requestHandler(ctx *fasthttp.RequestCtx) {
