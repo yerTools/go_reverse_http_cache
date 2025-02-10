@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -13,7 +14,7 @@ import (
 	"github.com/yerTools/go_reverse_http_cache/src/go/cache"
 )
 
-const availableForwarderSize = 16
+const availableForwarderSize = 64
 
 type releaseResponseLevel int
 
@@ -111,6 +112,16 @@ func main() {
 		availableForwarder: make(chan struct{}, availableForwarderSize),
 		lastCost:           0,
 		lastCostMutex:      sync.RWMutex{},
+
+		targetHost:   "ltl.re",
+		targetScheme: "https",
+	}
+
+	if os.Getenv("CACHE_TARGET_HOST") != "" {
+		c.targetHost = os.Getenv("CACHE_TARGET_HOST")
+	}
+	if os.Getenv("CACHE_TARGET_SCHEME") != "" {
+		c.targetScheme = os.Getenv("CACHE_TARGET_SCHEME")
 	}
 
 	for i := 0; i < availableForwarderSize; i++ {
@@ -162,6 +173,9 @@ type httpCache struct {
 	lastCost        int64
 	lastCostExpires time.Time
 	lastCostMutex   sync.RWMutex
+
+	targetHost   string
+	targetScheme string
 }
 
 func (c *httpCache) cacheCost() int64 {
@@ -191,8 +205,8 @@ func (c *httpCache) forwardHandler(targetReq *fasthttp.Request, targetResp *fast
 		req := fasthttp.AcquireRequest()
 		defer fasthttp.ReleaseRequest(req)
 		targetReq.CopyTo(req)
-		req.SetHost("ltl.re")
-		req.URI().SetScheme("https")
+		req.SetHost(c.targetHost)
+		req.URI().SetScheme(c.targetScheme)
 		log.Printf("Forwarding to %v\n", req.URI())
 
 		err := c.client.Do(req, targetResp)
@@ -224,8 +238,8 @@ func (c *httpCache) forwardHandler(targetReq *fasthttp.Request, targetResp *fast
 		req := fasthttp.AcquireRequest()
 		defer fasthttp.ReleaseRequest(req)
 		targetReq.CopyTo(req)
-		req.SetHost("ltl.re")
-		req.URI().SetScheme("https")
+		req.SetHost(c.targetHost)
+		req.URI().SetScheme(c.targetScheme)
 		log.Printf("Forwarding to %v (singleflight)\n", req.URI())
 
 		resp := fasthttp.AcquireResponse()
