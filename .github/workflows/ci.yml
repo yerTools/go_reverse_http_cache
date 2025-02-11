@@ -72,7 +72,7 @@ jobs:
             BIN_NAME="${BIN_NAME}.exe"
           fi
           echo "Building for OS: $GOOS, Arch: $GOARCH -> $BIN_NAME"
-          go build -o build/${BIN_NAME} ./main.go
+          go build -ldflags="-s -w" -o build/${BIN_NAME} ./main.go
           ls -lah build/
 
       - name: Upload Build Artifact
