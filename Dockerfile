@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -8,7 +8,8 @@ RUN go mod download
 COPY main.go .
 COPY src/go/ ./src/go/
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o go_reverse_http_cache ./main.go
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o go_reverse_http_cache ./main.go
 
 
 FROM scratch
