@@ -151,10 +151,46 @@ func main() {
 		}
 	}()
 
-	log.Println("fasthttp server is running on :8161")
-	if err := fasthttp.ListenAndServe(":8161", c.requestHandler); err != nil {
-		log.Fatalf("Could not start fasthttp server: %v", err)
+	certPath := os.Getenv("CACHE_CERT_PATH")
+	keyPath := os.Getenv("CACHE_KEY_PATH")
+
+	serveHttps := certPath != "" && keyPath != ""
+	redirectToHttps := serveHttps && os.Getenv("CACHE_REDIRECT_TO_HTTPS") == "true"
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		log.Println("fasthttp server is running on :8161")
+
+		handler := c.requestHandler
+		if redirectToHttps {
+			handler = func(ctx *fasthttp.RequestCtx) {
+				uri := ctx.URI()
+				uri.SetScheme("https")
+
+				ctx.Redirect(string(uri.FullURI()), fasthttp.StatusFound)
+			}
+
+		}
+
+		if err := fasthttp.ListenAndServe(":8161", handler); err != nil {
+			log.Fatalf("Could not start fasthttp server: %v", err)
+		}
+	}()
+
+	if serveHttps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Println("Starting TLS server on :8269")
+			if err := fasthttp.ListenAndServeTLS(":8269", certPath, keyPath, c.requestHandler); err != nil {
+				log.Fatalf("Could not start fasthttp server: %v", err)
+			}
+		}()
 	}
+
+	wg.Wait()
 }
 
 type cacheValue struct {
